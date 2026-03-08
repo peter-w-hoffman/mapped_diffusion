@@ -1,0 +1,64 @@
+# ----------------------------
+# Python / packaging
+# ----------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+*.whl
+
+# ----------------------------
+# Virtual environments / UV
+# ----------------------------
+.venv/
+venv/
+.env
+.python-version
+
+# ----------------------------
+# Jupyter / notebooks
+# ----------------------------
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ----------------------------
+# Tooling / testing / caches
+# ----------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+htmlcov/
+
+# ----------------------------
+# Editors / OS cruft
+# ----------------------------
+.DS_Store
+.vscode/
+.idea/
+
+# ----------------------------
+# ML artifacts (usually large)
+# ----------------------------
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npy
+*.npz
+
+# ----------------------------
+# Data / experiment outputs
+# ----------------------------
+data/
+datasets/
+wandb/
+runs/
+logs/
+outputs/
+checkpoints/
