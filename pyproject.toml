@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cvxpy>=1.8.1",
+    "ecos>=2.0.14",
     "ipykernel>=7.1.0",
     "jupyterlab>=4.5.0",
     "keras>=3.12.0",
