@@ -375,15 +375,27 @@ class UNet28(nn.Module):
         return self.out_conv(F.silu(self.out_norm(h)))
 
 
-def train_ddpm(model, train_loader, schedule, epochs=2, lr=2e-4, device=device):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+def update_ema(ema_model, model, decay=0.9999):
+    with torch.no_grad():
+        for p_ema, p in zip(ema_model.parameters(), model.parameters()):
+            p_ema.mul_(decay).add_(p.data, alpha=1.0 - decay)
+
+def train_ddpm(model, train_loader, schedule, epochs=120, lr=1e-4, device=device):
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,
+        betas=(0.9, 0.999),
+        weight_decay=0.0,
+    )
+
+    ema_model = copy.deepcopy(model).to(device)
+    ema_model.eval()
+    for p in ema_model.parameters():
+        p.requires_grad_(False)
+
     model.train()
-
     for epoch in range(1, epochs + 1):
-        pbar = tqdm(train_loader, desc=f"[DDPM] Epoch {epoch}/{epochs}", leave=True)
-        ema = None
-
-        for x0, _ in pbar:
+        for x0, _ in train_loader:
             x0 = x0.to(device, non_blocking=(device.type == "cuda"))
 
             t = torch.randint(0, schedule.T, (x0.size(0),), device=device, dtype=torch.long)
@@ -395,15 +407,14 @@ def train_ddpm(model, train_loader, schedule, epochs=2, lr=2e-4, device=device):
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            ema = loss.item() if ema is None else (0.95 * ema + 0.05 * loss.item())
-            pbar.set_postfix(loss=f"{ema:.4f}")
+            update_ema(ema_model, model, decay=0.9999)
 
-        print(f"[DDPM] Epoch {epoch}: loss={ema:.4f}")
+        print(f"[DDPM] Epoch {epoch}: loss={loss.item():.4f}")
 
-    return model
-
+    return model, ema_model
 
 def _seeded_randn_like(x, seed):
     gen = torch.Generator(device="cpu")
