@@ -493,7 +493,7 @@ def forward_backward_reconstruct(model, schedule, precond, x_raw_m11, t_start, f
 @torch.no_grad()
 def sample_ddpm_raw(model, schedule, precond, n_samples=25, device=device):
     """
-    Unconditional DDPM sampling, returned in original raw image space [-1,1].
+    Unconditional DDPM sampling, returned in original raw image space [-1,1] .
     """
     x_pre = p_sample_loop(model, schedule, n_samples=n_samples, device=device)
     x_raw = precond.undo(x_pre).clamp(-1, 1)
