@@ -1,3 +1,4 @@
+# File: ddpm_lib.py
 import math
 import torch
 import torch.nn as nn
@@ -8,7 +9,7 @@ from tqdm import tqdm
 
 from common import IMG_SIZE, D, device
 
-# 
+
 def base_m11_transform():
     return transforms.Compose([
         transforms.ToTensor(),
@@ -30,10 +31,10 @@ class PrecondNormalizeMNIST:
         self.eps = float(eps)
 
     def __call__(self, img):
-        x = self.to_tensor(img)                # [1,28,28] in [0,1]
-        x = x * 2.0 - 1.0                      # [1,28,28] in [-1,1]
-        x_flat = x.view(-1)                    # [784]
-        x_pre = self.M @ x_flat                # [784]
+        x = self.to_tensor(img)
+        x = x * 2.0 - 1.0
+        x_flat = x.view(-1)
+        x_pre = self.M @ x_flat
         x_norm = (x_pre - self.mean) / (self.std + self.eps)
         x_norm = x_norm * self.target_std
         return x_norm.view(1, IMG_SIZE, IMG_SIZE)
@@ -49,7 +50,7 @@ class DDPMPreconditioner:
     """
     def __init__(
         self,
-        mode="identity",          # "identity" or "M"
+        mode="identity",
         m_path="M_784.pt",
         target_std=1.0,
         eps=1e-6,
@@ -188,7 +189,7 @@ class DDPMPreconditioner:
         )
 
 
-def get_ddpm_train_loader(precond, root="./data", batch_size=128, train=True, shuffle=True):
+def get_ddpm_train_loader(precond, root="./data", batch_size=128, train=True, shuffle=True, drop_last=True):
     ds = datasets.MNIST(
         root=root,
         train=train,
@@ -201,7 +202,7 @@ def get_ddpm_train_loader(precond, root="./data", batch_size=128, train=True, sh
         shuffle=shuffle,
         num_workers=0,
         pin_memory=(precond.device.type == "cuda"),
-        drop_last=True,
+        drop_last=drop_last,
     )
     return ds, loader
 
@@ -375,12 +376,51 @@ class UNet28(nn.Module):
         return self.out_conv(F.silu(self.out_norm(h)))
 
 
-def train_ddpm(model, train_loader, schedule, epochs=2, lr=2e-4, device=device):
+@torch.no_grad()
+def evaluate_ddpm_loss(model, data_loader, schedule, device=device):
+    was_training = model.training
+    model.eval()
+
+    total_loss = 0.0
+    total_count = 0
+
+    for x0, _ in data_loader:
+        x0 = x0.to(device, non_blocking=(device.type == "cuda"))
+
+        t = torch.randint(0, schedule.T, (x0.size(0),), device=device, dtype=torch.long)
+        noise = torch.randn_like(x0)
+        xt = schedule.q_sample(x0, t, noise)
+
+        pred_noise = model(xt, t)
+        loss = F.mse_loss(pred_noise, noise, reduction="sum")
+
+        total_loss += loss.item()
+        total_count += noise.numel()
+
+    if was_training:
+        model.train()
+
+    return total_loss / total_count
+
+
+def train_ddpm(
+    model,
+    train_loader,
+    schedule,
+    epochs=2,
+    lr=2e-4,
+    device=device,
+    test_loader=None,
+    return_history=True,
+):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    model.train()
+    history = {"train_loss": [], "test_loss": []}
 
     for epoch in range(1, epochs + 1):
+        model.train()
         pbar = tqdm(train_loader, desc=f"[DDPM] Epoch {epoch}/{epochs}", leave=True)
+        train_loss_sum = 0.0
+        train_count = 0
         ema = None
 
         for x0, _ in pbar:
@@ -397,10 +437,23 @@ def train_ddpm(model, train_loader, schedule, epochs=2, lr=2e-4, device=device):
             loss.backward()
             optimizer.step()
 
+            train_loss_sum += F.mse_loss(pred_noise.detach(), noise, reduction="sum").item()
+            train_count += noise.numel()
             ema = loss.item() if ema is None else (0.95 * ema + 0.05 * loss.item())
             pbar.set_postfix(loss=f"{ema:.4f}")
 
-        print(f"[DDPM] Epoch {epoch}: loss={ema:.4f}")
+        train_loss = train_loss_sum / train_count
+        history["train_loss"].append(train_loss)
+
+        if test_loader is None:
+            print(f"[DDPM] Epoch {epoch}: train_loss={train_loss:.4f}")
+        else:
+            test_loss = evaluate_ddpm_loss(model, test_loader, schedule, device=device)
+            history["test_loss"].append(test_loss)
+            print(f"[DDPM] Epoch {epoch}: train_loss={train_loss:.4f} test_loss={test_loss:.4f}")
+
+    if return_history:
+        return model, history
 
     return model
 
@@ -409,6 +462,48 @@ def _seeded_randn_like(x, seed):
     gen = torch.Generator(device="cpu")
     gen.manual_seed(int(seed))
     return torch.randn(x.shape, generator=gen, device="cpu", dtype=x.dtype).to(x.device)
+
+
+@torch.no_grad()
+def forward_diffuse_model(schedule, x0_model, t, noise=None, forward_seed=None):
+    """
+    Forward diffusion primitive in DDPM model space.
+
+    This is deterministic once either `noise` or `forward_seed` is fixed.
+    """
+    t = int(t)
+    t_tensor = torch.full((x0_model.size(0),), t, device=x0_model.device, dtype=torch.long)
+
+    if noise is None:
+        noise = torch.randn_like(x0_model) if forward_seed is None else _seeded_randn_like(x0_model, forward_seed)
+
+    xt_model = schedule.q_sample(x0_model, t_tensor, noise)
+    return {
+        "x0_model": x0_model,
+        "xt_model": xt_model,
+        "t": t_tensor,
+        "forward_noise": noise,
+    }
+
+
+@torch.no_grad()
+def forward_to_xt(schedule, precond, x_raw_m11, t, noise=None, forward_seed=None):
+    """
+    Raw-space convenience wrapper for forward diffusion:
+        raw image x0 in [-1,1]
+        -> map into DDPM model space
+        -> return x_t in DDPM model space
+
+    This is the reusable forward-process entry point for later experiments.
+    """
+    x0_model = precond.apply(x_raw_m11)
+    return forward_diffuse_model(
+        schedule=schedule,
+        x0_model=x0_model,
+        t=t,
+        noise=noise,
+        forward_seed=forward_seed,
+    )
 
 
 @torch.no_grad()
@@ -465,6 +560,49 @@ def reconstruct_from_xt(model, schedule, xt, t_start, reverse_seed=None):
 
 
 @torch.no_grad()
+def reconstruct_from_xt_with_trajectory(model, schedule, xt, t_start, reverse_seed=None):
+    """
+    Reverse starting from x_t and also save the entire reverse trajectory.
+
+    Returned trajectory convention:
+      - trajectory_model[:, 0] is the starting x_t
+      - reverse_update_steps[r] is the timestep used for reverse update r
+      - trajectory_model[:, r + 1] is the state after that reverse update
+    """
+    model.eval()
+    x = xt
+    t_start = int(t_start)
+
+    reverse_update_steps = list(range(t_start, -1, -1))
+    trajectory = [x.detach().clone()]
+
+    for i in reverse_update_steps:
+        t = torch.full((x.size(0),), i, device=x.device, dtype=torch.long)
+        eps = model(x, t)
+
+        beta_t = schedule.extract(schedule.betas, t)
+        sqrt_1m_ab_t = schedule.extract(schedule.sqrt_one_minus_alpha_bar, t)
+        sqrt_recip_a_t = schedule.extract(schedule.sqrt_recip_alphas, t)
+
+        model_mean = sqrt_recip_a_t * (x - beta_t * eps / sqrt_1m_ab_t)
+
+        if i == 0:
+            x = model_mean
+        else:
+            var = schedule.extract(schedule.posterior_variance, t)
+            z = torch.randn_like(x) if reverse_seed is None else _seeded_randn_like(x, reverse_seed + i)
+            x = model_mean + torch.sqrt(var) * z
+
+        trajectory.append(x.detach().clone())
+
+    return {
+        "x_rec_model": x,
+        "trajectory_model": torch.stack(trajectory, dim=1),
+        "reverse_update_steps": reverse_update_steps,
+    }
+
+
+@torch.no_grad()
 def forward_backward_reconstruct(model, schedule, precond, x_raw_m11, t_start, forward_seed=None, reverse_seed=None):
     """
     Full experiment primitive:
@@ -474,26 +612,36 @@ def forward_backward_reconstruct(model, schedule, precond, x_raw_m11, t_start, f
         -> reverse back to time 0
         -> map back to raw image space [-1,1]
     """
-    x0_model = precond.apply(x_raw_m11)
-    t = torch.full((x0_model.size(0),), int(t_start), device=x0_model.device, dtype=torch.long)
-    noise = torch.randn_like(x0_model) if forward_seed is None else _seeded_randn_like(x0_model, forward_seed)
-    xt = schedule.q_sample(x0_model, t, noise)
-    x_rec_model = reconstruct_from_xt(model, schedule, xt, t_start=int(t_start), reverse_seed=reverse_seed)
+    forward = forward_to_xt(
+        schedule=schedule,
+        precond=precond,
+        x_raw_m11=x_raw_m11,
+        t=t_start,
+        forward_seed=forward_seed,
+    )
+    x_rec_model = reconstruct_from_xt(
+        model=model,
+        schedule=schedule,
+        xt=forward["xt_model"],
+        t_start=int(t_start),
+        reverse_seed=reverse_seed,
+    )
     x_rec_raw = precond.undo(x_rec_model).clamp(-1, 1)
 
     return {
-        "x0_model": x0_model,
-        "xt": xt,
+        "x0_model": forward["x0_model"],
+        "xt": forward["xt_model"],
+        "xt_model": forward["xt_model"],
         "x_rec_model": x_rec_model,
         "x_rec_raw": x_rec_raw,
-        "forward_noise": noise,
+        "forward_noise": forward["forward_noise"],
     }
 
 
 @torch.no_grad()
 def sample_ddpm_raw(model, schedule, precond, n_samples=25, device=device):
     """
-    Unconditional DDPM sampling, returned in original raw image space [-1,1] .
+    Unconditional DDPM sampling, returned in original raw image space [-1,1].
     """
     x_pre = p_sample_loop(model, schedule, n_samples=n_samples, device=device)
     x_raw = precond.undo(x_pre).clamp(-1, 1)

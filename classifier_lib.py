@@ -1,3 +1,8 @@
+# File: classifier_lib.py
+
+
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,19 +21,22 @@ MNIST_STD = 0.3081
 def get_classifier_transform(input_space="01_norm"):
     """
     Keep the original notebook behavior by default:
-      "01_norm" = ToTensor() + MNIST normalization
+    "01_norm" = ToTensor() + MNIST normalization
     """
     if input_space == "01_norm":
         return transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
         ])
+
     # if input_space == "01_raw":
     #     return transforms.ToTensor()
+
     raise ValueError(f"Unknown INPUT_SPACE: {input_space}")
 
 
-def ddpm_raw_to_clf_input(x_raw_m11, input_space="01_norm", mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD):
+def ddpm_raw_to_clf_input(x_raw_m11, input_space="01_norm",
+                          mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD):
     """
     Convert DDPM raw output in [-1,1] into the classifier input space.
     """
@@ -37,8 +45,10 @@ def ddpm_raw_to_clf_input(x_raw_m11, input_space="01_norm", mnist_mean=MNIST_MEA
 
     if input_space == "01_norm":
         return (x01 - mnist_mean) / mnist_std
+
     # if input_space == "01_raw":
     #     return x01
+
     raise ValueError(f"Unknown INPUT_SPACE: {input_space}")
 
 
@@ -46,7 +56,7 @@ def get_classifier_loaders(root="./data", batch_size=64, input_space="01_norm"):
     tfm = get_classifier_transform(input_space=input_space)
 
     train_ds = datasets.MNIST(root=root, train=True, download=True, transform=tfm)
-    test_ds = datasets.MNIST(root=root, train=False, download=True, transform=tfm)
+    test_ds  = datasets.MNIST(root=root, train=False, download=True, transform=tfm)
 
     train_loader = DataLoader(
         train_ds,
@@ -76,9 +86,9 @@ class MNISTCNN(nn.Module):
         self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
         self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
         self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
-        self.fc1 = nn.Linear(128 * 7 * 7, 256)
-        self.fc2 = nn.Linear(256, 10)
-        self.drop = nn.Dropout(0.25)
+        self.fc1   = nn.Linear(128 * 7 * 7, 256)
+        self.fc2   = nn.Linear(256, 10)
+        self.drop  = nn.Dropout(0.25)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -95,18 +105,17 @@ class MNISTCNN(nn.Module):
 def eval_acc(model, loader):
     model.eval()
     correct, total = 0, 0
-
     for x, y in loader:
         x = x.to(device, non_blocking=(device.type == "cuda"))
         y = y.to(device, non_blocking=(device.type == "cuda"))
         pred = model(x).argmax(dim=1)
         correct += (pred == y).sum().item()
         total += y.numel()
-
     return 100.0 * correct / max(total, 1)
 
 
-def train_classifier(model, train_loader, test_loader, epochs=5, lr=1e-3, weight_decay=1e-4, device=device):
+def train_classifier(model, train_loader, test_loader,
+                     epochs=5, lr=1e-3, weight_decay=1e-4, device=device):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     for epoch in range(1, epochs + 1):
@@ -135,7 +144,8 @@ def train_classifier(model, train_loader, test_loader, epochs=5, lr=1e-3, weight
 
 
 @torch.no_grad()
-def classify_raw_m11(model, x_raw_m11, input_space="01_norm", mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD):
+def classify_raw_m11(model, x_raw_m11, input_space="01_norm",
+                     mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD):
     """
     Classifier evaluation entry point for reconstructed DDPM outputs.
     """
@@ -162,9 +172,11 @@ def classify_raw_m11(model, x_raw_m11, input_space="01_norm", mnist_mean=MNIST_M
 
 
 @torch.no_grad()
-def classify_and_show_raw(model, x_raw_m11, input_space="01_norm", mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD, nrow=5):
+def classify_and_show_raw(model, x_raw_m11, input_space="01_norm",
+                          mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD, nrow=5):
     """
-    Convenience function preserving the original DDPM-samples-to-classifier visualization workflow.
+    Convenience function preserving the original DDPM-samples-to-classifier
+    visualization workflow.
     """
     out = classify_raw_m11(
         model,
@@ -182,12 +194,26 @@ def classify_and_show_raw(model, x_raw_m11, input_space="01_norm", mnist_mean=MN
     plt.imshow(grid.permute(1, 2, 0).squeeze().cpu(), cmap="gray")
     plt.show()
 
-    print("preds:", out["preds"].detach().cpu().tolist())
-    print("confidences:", [round(x, 4) for x in out["confidences"].detach().cpu().tolist()])
+    preds = out["preds"].detach().cpu().tolist()
+    print("preds[0:5]:", preds[0:5])
+    print("preds[5:10]:", preds[5:10])
+    print("preds[10:15]:", preds[10:15])
+    print("preds[15:20]:", preds[15:20])
+    print("preds[20:25]:", preds[20:25])
+
+    confidences = [round(x, 3) for x in out["confidences"].detach().cpu().tolist()]
+    print("confidences[0:5]:", confidences[0:5])
+    print("confidences[5:10]:", confidences[5:10])
+    print("confidences[10:15]:", confidences[10:15])
+    print("confidences[15:20]:", confidences[15:20])
+    print("confidences[20:25]:", confidences[20:25])
     return out
 
 
-def save_classifier_checkpoint(path, model, input_space="01_norm", mnist_mean=MNIST_MEAN, mnist_std=MNIST_STD):
+def save_classifier_checkpoint(path, model,
+                               input_space="01_norm",
+                               mnist_mean=MNIST_MEAN,
+                               mnist_std=MNIST_STD):
     ckpt = {
         "model_state": model.state_dict(),
         "input_space": input_space,
